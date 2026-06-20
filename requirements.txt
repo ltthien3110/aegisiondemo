@@ -1,7 +1,6 @@
-setuptools
 streamlit
-opencv-python-headless
-streamlit-webrtc
 numpy
 av
+streamlit-webrtc
+opencv-python-headless==4.9.0.80
 cvzone
