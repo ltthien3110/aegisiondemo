@@ -1,3 +1,4 @@
+setuptools
 streamlit
 opencv-python-headless
 streamlit-webrtc
