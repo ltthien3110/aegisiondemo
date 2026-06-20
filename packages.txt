@@ -1,2 +1,0 @@
-libgl1-mesa-glx
-libgib2.0-0
