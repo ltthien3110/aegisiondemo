@@ -1,0 +1,169 @@
+import streamlit as st
+import cv2
+import time
+import numpy as np
+import av
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
+# Giải pháp cứu cánh hoàn hảo cho Python 3.12 - Không lo lỗi ModuleNotFound
+from cvzone.FaceMeshModule import FaceMeshDetector
+
+# ================= CẤU HÌNH GIAO DIỆN =================
+EYE_CONFIRM_FRAMES = 3
+EAR_MULTIPLIER = 0.55
+# Tối ưu lại bộ lọc khoảng cách dựa trên kích thước pixel thực tế của cvzone
+DISTANCE_70CM_THRESH = 75
+DISTANCE_NEAR_THRESH = 115
+DROWSY_TIME_LIMIT = 3.5
+COLOR_EYE_PROTECT = (186, 213, 168)
+
+# Khởi tạo bộ phát hiện khuôn mặt của cvzone (tự động xử lý nền)
+detector = FaceMeshDetector(maxFaces=1)
+
+# ================= HÀM TÍNH TOÁN CHỈ SỐ MỞ MẮT (EAR) =================
+def calculate_ear_cvzone(lm_list):
+    try:
+        # Mắt trái: Trích xuất tọa độ các điểm tương đương cấu trúc MediaPipe
+        p_l = [lm_list[i] for i in [33, 160, 158, 133, 153, 144]]
+        v1_l = np.linalg.norm(np.array(p_l[1][:2]) - np.array(p_l[5][:2]))
+        v2_l = np.linalg.norm(np.array(p_l[2][:2]) - np.array(p_l[4][:2]))
+        h_l = np.linalg.norm(np.array(p_l[0][:2]) - np.array(p_l[3][:2]))
+        ear_left = (v1_l + v2_l) / (2.0 * h_l)
+
+        # Mắt phải: Trích xuất tọa độ
+        p_r = [lm_list[i] for i in [362, 385, 387, 263, 373, 380]]
+        v1_r = np.linalg.norm(np.array(p_r[1][:2]) - np.array(p_r[5][:2]))
+        v2_r = np.linalg.norm(np.array(p_r[2][:2]) - np.array(p_r[4][:2]))
+        h_r = np.linalg.norm(np.array(p_r[0][:2]) - np.array(p_r[3][:2]))
+        ear_right = (v1_r + v2_r) / (2.0 * h_r)
+
+        return max(ear_left, ear_right)
+    except Exception:
+        return 0
+
+def boost_contrast(img):
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+    cl = clahe.apply(l)
+    return cv2.cvtColor(cv2.merge((cl, a, b)), cv2.COLOR_LAB2BGR)
+
+# ================= STREAMLIT UI =================
+st.set_page_config(page_title="IrisAdapt Pro", layout="wide")
+st.title("IrisAdapt Pro – Eye Protection & Drowsiness Detection")
+
+# ================= VIDEO PROCESSOR =================
+class VideoProcessor(VideoProcessorBase):
+    def __init__(self):
+        self.blink_count = 0
+        self.blink_history = []
+        self.is_closed = False
+        self.frame_counter = 0
+        self.eye_start = 0
+        self.is_drowsy = False
+        self.ear_avg_list = []
+
+    def recv(self, frame):
+        img = frame.to_ndarray(format="bgr24")
+        img = cv2.flip(img, 1)
+        proc = boost_contrast(img.copy())
+
+        h_img, w_img, _ = img.shape
+        current_time = time.time()
+
+        status_text = ""
+        status_color = (0, 165, 255)
+        bg_overlay = None
+        ear = 0
+        dynamic_threshold = 0.18
+
+        self.blink_history = [t for t in self.blink_history if current_time - t < 60]
+        bpm = len(self.blink_history)
+  display_msg = f"CHOP: {self.blink_count} | BPM: {bpm}"
+
+        # Nhận diện khuôn mặt bằng bộ công cụ ổn định cvzone
+        proc, faces = detector.findFaceMesh(proc, draw=False)
+
+        if faces:
+            lms = faces[0] # Lấy danh sách tọa độ pixel trực tiếp (x, y, z)
+
+            ear = calculate_ear_cvzone(lms)
+
+            if ear > 0.22:
+                self.ear_avg_list.append(ear)
+                if len(self.ear_avg_list) > 30:
+                    self.ear_avg_list.pop(0)
+
+            if self.ear_avg_list:
+                dynamic_threshold = np.mean(self.ear_avg_list) * EAR_MULTIPLIER
+
+            # Đo khoảng cách pixel dựa trên mốc mắt 33 và 263 trực tiếp
+            dist_pixel = int(np.linalg.norm(np.array(lms[33][:2]) - np.array(lms[263][:2])))
+
+            # ===== LOGIC NHẮM MẮT / NGỦ GẬT =====
+            if ear < dynamic_threshold:
+                self.frame_counter += 1
+                if self.frame_counter >= EYE_CONFIRM_FRAMES:
+                    if not self.is_closed:
+                        self.is_closed = True
+                        self.eye_start = current_time
+
+                    if (current_time - self.eye_start) >= DROWSY_TIME_LIMIT:
+                        self.is_drowsy = True
+                        status_text = "!!! NGU GAT !!!"
+                        status_color = (0, 0, 255)
+                        bg_overlay = (0, 0, 120)
+            else:
+                if self.is_closed:
+                    if self.is_drowsy:
+                        self.blink_count = 0
+                        self.blink_history = []
+                        self.is_drowsy = False
+                    elif 0.08 < (current_time - self.eye_start) < 1.0:
+                        self.blink_count += 1
+                        self.blink_history.append(current_time)
+                self.is_closed = False
+                self.frame_counter = 0
+
+            # ===== GIAO DIỆN THEO KHOẢNG CÁCH =====
+            if not self.is_drowsy:
+                if dist_pixel < DISTANCE_70CM_THRESH:
+                    display_msg = "NHAT"
+
+                if bpm < 7:
+                    bg_overlay = COLOR_EYE_PROTECT
+                    status_text = "BAO VE MAT: DANG BAT"
+
+                if dist_pixel > DISTANCE_NEAR_THRESH:
+                    status_text = "CANH BAO: NGOI QUA GAN!"
+
+        # ===== OVERLAY MÀU LÊN MÀN HÌNH =====
+        if bg_overlay:
+            overlay = img.copy()
+            cv2.rectangle(overlay, (0, 0), (w_img, h_img), bg_overlay, -1)
+            img = cv2.addWeighted(overlay, 0.25, img, 0.75, 0)
+
+        cv2.rectangle(img, (0, 0), (w_img, 100), (30, 30, 30), -1)
+        cv2.putText(img, display_msg, (20, 60), 0, 1.5, (255, 255, 255), 3)
+
+        if status_text:
+            cv2.putText(img, status_text, (w_img // 2 - 160, 90), 0, 0.9, status_color, 2)
+
+        cv2.putText(
+            img,
+            f"EAR: {ear:.2f} | THR: {dynamic_threshold:.2f}",
+         (w_img - 300, 130),
+            0,
+            0.6,
+            (255, 255, 255),
+            2
+        )
+
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+# ================= KÍCH HOẠT CAMERA STREAM =================
+webrtc_streamer(
+    key="irisadapt-pro",
+    video_processor_factory=VideoProcessor,
+    media_stream_constraints={"video": True, "audio": False},
+)
+         
