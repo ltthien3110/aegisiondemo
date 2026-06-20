@@ -2,5 +2,6 @@ streamlit
 streamlit-webrtc
 numpy==1.26.4
 av
-cvzone
-opencv-python-headless-bin
+mediapipe==0.10.14
+opencv-python-headless
+cvzone==1.6.1
