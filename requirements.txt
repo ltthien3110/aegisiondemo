@@ -1,6 +1,6 @@
 streamlit
-opencv-python-headless
 streamlit-webrtc
 numpy==1.26.4
 av
 cvzone
+opencv-python-headless-bin
